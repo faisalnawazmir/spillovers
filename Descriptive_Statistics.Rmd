@@ -15,6 +15,11 @@ options(scipen = 100, digits = 8)
 knitr::opts_chunk$set(warning=FALSE)
 knitr::opts_chunk$set(message=FALSE)
 knitr::opts_chunk$set(echo = TRUE)
+quiet <- function(x) { 
+  sink(tempfile()) 
+  on.exit(sink()) 
+  invisible(force(x)) 
+}
 ```
 
 ```{r }
@@ -29,6 +34,8 @@ library(kableExtra)
 library(stargazer)
 library(tseries)
 library(tidyverse)
+library(moments)
+library(fGarch)
 ```
 
 ```{r lagpad, echo = F}
@@ -48,6 +55,8 @@ lagpad <- function(x, k = 1) {
 ## Load data
 
 ```{r load_data}
+stylized_names <-c("Natural Gas","Crude Oil WTI","NY Gasoline","Gulf Gasoline","Heating Oil","Diesel")
+
 nat_gas_spot <- read_excel("data/NG_PRI_FUT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
   rename("Natural_Gas" = 2)
 crude_oil_spot <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
@@ -60,18 +69,18 @@ diesel <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 5", skip = 2) %>
   select(-2, -3) %>%
   rename("Diesel" = 2)
 
-dt <- nat_gas_spot %>%
+df <- nat_gas_spot %>%
   full_join(crude_oil_spot, by = "Date") %>%
   full_join(gasoline, by = "Date") %>%
   full_join(heating_oil, by = "Date") %>%
   full_join(diesel, by = "Date") %>%
   arrange(Date) %>%
-  filter(Date >= "1997-01-07") %>%
+  dplyr::filter(Date >= "1997-01-07") %>%
   mutate(Date=as.Date(Date),
          Day = weekdays(Date)) %>%
   select(1,9,2:8)
 
-head(dt) %>% 
+head(df) %>% 
   kbl() %>%
   kable_classic_2(full_width = F)
 ```
@@ -98,13 +107,13 @@ plot(decompose(as.ts(nat_gas_spot_ts)))
 
 ```{r NAs, echo = F}
 print("Sum on NAs in each column")
-colSums(is.na(dt))%>%
+colSums(is.na(df))%>%
     kbl(col.names="NAs") %>%
   kable_classic_2(full_width = F)
 print("Sample of uncomplete data")
-aux <- dt[!complete.cases(dt), ]
+aux <- df[!complete.cases(df), ]
 head(aux) %>% 
-  rbind(aux%>%filter(Day=="Sunday"))%>%
+  rbind(aux%>%dplyr::filter(Day=="Sunday"))%>%
   kbl() %>%
   kable_classic_2(full_width = F)
 print("NA occurrences per weekday: no particular pattern in weekdays, although most reported on Monday")
@@ -123,12 +132,12 @@ It might be best to treat the first and second data source as separate, but ther
 
 
 ```{r na_treating1, echo = F}
-aux2<-aux %>% select(-Crude_Oil_Europe_Brent) %>% filter(Day != "Sunday") # treating the first 2 sources of NA
+aux2<-aux %>% select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday") # treating the first 2 sources of NA
 NA_dates <- aux2 %>%
   filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
   pull(Date)
 
-aux2<-aux2%>% filter(!Date %in% NA_dates)
+aux2<-aux2%>% dplyr::filter(!Date %in% NA_dates)
 aux3<-aux2[!complete.cases(aux2), ]
 aux3%>%
   kbl() %>%
@@ -136,85 +145,59 @@ aux3%>%
 ```
 
 ```{r na_treating_main}
-dt <- dt %>% select(-Crude_Oil_Europe_Brent) %>% filter(Day != "Sunday")
-NA_dates <- dt %>%
+df <- df %>% select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday")
+NA_dates <- df %>%
   filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
   pull(Date)
-dt <- dt %>% filter(!Date %in% NA_dates)
-dt <- dt %>% mutate_all(~ replace(., is.na(.), mean(., na.rm = TRUE)))
+df <- df %>% dplyr::filter(!Date %in% NA_dates)
+df <- df %>% mutate_all(~ replace(., is.na(.), mean(., na.rm = TRUE)))
 ```
 
 
 
-### Summary statistics - Prices
-
+### Prices
 ```{r prices_stats}
-long_dt <- melt(dt, id.vars = c("Date","Day"))
+long_df <- reshape2::melt(df, id.vars = c("Date","Day"))
 
-ggplot(long_dt, aes(factor(variable), value)) + 
-geom_boxplot() + 
-facet_wrap(~variable, scale="free")
-
-long_dt %>% group_by(as.factor(variable)) %>%
-  get_summary_stats(type = "common")%>%
-  kbl() %>%
-  kable_classic_2(full_width = F)
-
-```
-
-We see that this **crude oil WTI metric** had negative prices at one point. This would not let us do log-returns, so we substitute with low value for now. Should be treated more rigorously later on.
-
-```{r crude_oil_sub}
-dt[dt$Date=="2020-04-20","Crude_Oil_WTI"]<-0.01
-```
-
-### Log returns
-
-```{r}
-log_ret_dt <- tibble(dt[2:nrow(dt), "Date"])
-
-for (i in 3:(ncol(dt))) {
-  var_name <- paste(colnames(dt)[i], "log_ret", sep = "_")
-  vals <- log(dt[, i]) %>% pull()
-  lag_vals <- diff(vals, lag = 1)
-  log_ret_dt[var_name] <- lag_vals
-}
-
-```
-
-### Summary statistics - Log Returns
-
-```{r log_ret_stats}
-long_log_ret <- melt(log_ret_dt, id.vars = "Date")
-
-ggplot(long_log_ret, aes(factor(variable), value)) + 
-geom_boxplot() + 
-facet_wrap(~variable, scale="free")
-
-long_log_ret %>% group_by(as.factor(variable)) %>%
-  get_summary_stats(type = "common")%>%
-    kbl() %>%
-  kable_classic_2(full_width = F)
-
-```
-
-```{r corplot_logret}
-cor_long_dt <- cor(log_ret_dt[,-1])
-corrplot(cor_long_dt, type="upper", order="hclust", tl.col="black", tl.srt=45,
-         col = COL2('PiYG'), cl.pos = 'b', addCoef.col = 'black')
-```
-
-### Basic plots
-
-```{r price_plot}
-ggplot(long_dt, aes(x = Date, y = value)) +
+ggplot(long_df, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
   ggtitle("Prices") +
   geom_vline(xintercept = as.POSIXct("2008-9-15"), color = "Red")
+
+ggplot(long_df, aes(factor(variable), value)) + 
+geom_boxplot() + 
+facet_wrap(~variable, scale="free")
 ```
 
-Everything but Natural gas looks very correlated, price data are obviously not stationary, so we transform to log-returns.
+
+We see that this **crude oil WTI metric** had negative prices at one point. This would not let us do log-returns, so we substitute with low value for now. Should be treated more rigorously later on.
+
+```{r crude_oil_sub}
+df[df$Date=="2020-04-20","Crude_Oil_WTI"]<-0.01
+```
+
+### Log returns
+
+```{r log_ret}
+log_ret_df <- tibble(df[2:nrow(df), "Date"])
+
+for (i in 3:(ncol(df))) {
+  var_name <- paste(colnames(df)[i], "log_ret", sep = "_")
+  vals <- log(df[, i]) %>% pull()
+  lag_vals <- base::diff(vals, lag = 1)
+  log_ret_df[var_name] <- lag_vals
+}
+long_log_ret <- melt(log_ret_df, id.vars = "Date")
+```
+
+
+```{r corplot_logret}
+cor_long_df <- cor(log_ret_df[,-1])
+corrplot(cor_long_df, type="upper", order="hclust", tl.col="black", tl.srt=45,
+         col = COL2('PiYG'), cl.pos = 'b', addCoef.col = 'black')
+```
+
 
 ```{r log_ret_plot}
 ggplot(long_log_ret, aes(x = Date, y = value)) +
@@ -223,8 +206,6 @@ ggplot(long_log_ret, aes(x = Date, y = value)) +
   ggtitle("Log Returns - May be stationary")
 ```
 
-## Statistical Tests
-
 
 ```{r summary_table_draft}
 
@@ -232,124 +213,84 @@ summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
   get_summary_stats(type = "common") %>%select(-variable,n) %>% 
   rename("variable" = 1)%>%
   data.table::transpose( keep.names = "col",make.names = "variable")
+rownames(summary_df)<-summary_df[,1]
+summary_df<-summary_df[-1]
+
+
+summary_df[c("skewness", "kurtosis"),] <- rbind(c(sapply(log_ret_df[c(2:7)],skewness),
+                                                  sapply(log_ret_df[c(2:7)],kurtosis),
+                                                  sapply(log_ret_df[1000:6000,c(2:7)],kurtosis)))
+
+
+
+
 summary_df %>%
   kbl() %>%
   kable_classic_2()
 ```
-```{r}
 
+## Statistical Tests
+```{r test_prep, echo = T}
+ar_1_list <- list()
+q_10_list<- list()
+q2_10_list<- list()
+ma_1_list <- list()
+arch_5_list<-list()
+shapiro_norm_list<-list()
+adf_list<-list()
+
+for(i in 2:length(log_ret_df)){
+  val<-log_ret_df[,i] %>% pull()
+  res<-lm(val~I(lagpad(val, 1)))$residuals
+  shapiro_norm_list[[i-1]]<-shapiro.test(sample(val,size=5000,replace = F))
+  adf_list[[i-1]] <- adf.test(val)
+  ma_1_list[[i-1]] <- arima(val, order = c(0, 0, 1)) 
+  ar_1_list[[i-1]] <- arima( res, order = c(1, 0, 0))
+  q_10_list[[i-1]]<-Box.test(res, lag = 10, type =  "Ljung-Box")
+  q2_10_list[[i-1]]<-Box.test(res^2, lag = 10, type =  "Ljung-Box")
+  arch_5_list[[i-1]]<- quiet(garch(res,c(0,5)))
+  #arch_5_list[[i-1]] <- garchFit(~garch(0,5), data =res, trace = F)
+}
 
 ```
 
 
-### Autocorrelation tests
+```{r all_tests, echo = F}
+res_matrix<-data.frame(matrix(ncol=6,nrow=10))
+x <- c("name", "age", "gender")
+colnames(res_matrix) <- stylized_names
+rownames(res_matrix)<-c("Shapiro Normality","Shapiro Normality PVal","ADF","ADF Pval","Q(10)","Q(10) Pval","Q2(10)","Q2(10) Pval","ARCH(5)","ARCH(5) PVal")
 
-```{r natgas,echo = F}
-#Natural Gas
-model <- lm(Natural_Gas_log_ret ~ I(lagpad(Natural_Gas_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_nat_gas <- lm(res ~ lagpad(res, 1))
-```
-```{r adf_natgas}
-adf.test(log_ret_dt$Natural_Gas_log_ret) #no unit root
-```
+for (i in 1:length(stylized_names)){
+  res_matrix[1,i]<-round(shapiro_norm_list[[i]]$statistic,2)
+  res_matrix[2,i]<-ifelse(shapiro_norm_list[[i]]$p.value<0.001,"<0.001",shapiro_norm_list[[i]]$p.value)
+  res_matrix[3,i]<-round(adf_list[[i]]$statistic,2)
+  res_matrix[4,i]<-ifelse(adf_list[[i]]$p.value==0.01,"<0.01",adf_list[[i]]$p.value)
+  res_matrix[5,i]<-round(q_10_list[[i]]$statistic,2)
+  res_matrix[6,i]<-ifelse(q_10_list[[i]]$p.value<0.001,"<0.001",q_10_list[[i]]$p.value)
+  res_matrix[7,i]<-round(q2_10_list[[i]]$statistic,2)
+  res_matrix[8,i]<-ifelse(q2_10_list[[i]]$p.value<0.001,"<0.001",q2_10_list[[i]]$p.value)
+  arch_coefs<-summary(arch_5_list[[i]])$coef[5,]
+  p_val_arch<-2*pt(q=arch_coefs[3], 30, lower=FALSE) 
+  res_matrix[9,i]<-round(arch_coefs[1],2)
+  res_matrix[10,i]<-ifelse(p_val_arch<0.001,"<0.001",p_val_arch)
+}
 
-```{r natgas_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_nat_gas, header=FALSE,type="html") #no autocorrelation of residuals
-```
+res_matrix %>%
+  kbl() %>%
+  kable_classic_2()
 
-```{r crd,echo = F}
-#Crude Oil
-model <- lm(Crude_Oil_WTI_log_ret ~ I(lagpad(Crude_Oil_WTI_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_crd_oil<- lm(res ~ lagpad(res, 1))
-```
-
-```{r crd_adf}
-adf.test(log_ret_dt$Crude_Oil_WTI_log_ret) # no unit root
-```
-
-```{r crd_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_crd_oil, header=FALSE,type="html")  #AR(1) OF RESIDUALS
 ```
 
-
-```{r NY_gas,echo = F}
-#NY Gasoline
-model <- lm(NY_Gasoline_log_ret ~ I(lagpad(NY_Gasoline_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_gasoline<- lm(res ~ lagpad(res, 1))
+<div align="center">
+### AR(1)
+```{r ar_res,echo=TRUE,results='asis'}
+stargazer(ar_1_list, header=FALSE,type="html",column.labels = stylized_names)
 ```
-
-```{r NY_gas_adf}
-adf.test(log_ret_dt$NY_Gasoline_log_ret) # no unit root
+</div>
+<div align="center">
+### MA(1)
+```{r ma_res,echo=TRUE,results='asis'}
+stargazer(ma_1_list, header=FALSE,type="html",column.labels = stylized_names,font.size = "tiny") # to make font size smaller)
 ```
-
-```{r NY_gas_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_gasoline, header=FALSE,type="html")  #AR(1) OF RESIDUALS
-```
-
-```{r gulf_gas,echo = F}
-model <- lm(Gulf_Gasoline_log_ret ~ I(lagpad(Gulf_Gasoline_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_gulf_gas<- lm(res ~ lagpad(res, 1))
-```
-
-```{r gulf_gas_adf}
-adf.test(log_ret_dt$Gulf_Gasoline_log_ret) # no unit root
-```
-
-```{r gulf_gas_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_gulf_gas, header=FALSE,type="html") #AR(1) OF RESIDUALS
-```
-
-```{r heating_oil,echo = F}
-model <- lm(Heating_Oil_log_ret ~ I(lagpad(Heating_Oil_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_heating_oil<- lm(res ~ lagpad(res, 1))
-```
-
-```{r heating_oil_adf}
-adf.test(log_ret_dt$Heating_Oil_log_ret) # no unit root
-```
-
-```{r heating_oil_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_heating_oil, header=FALSE,type="html") #AR(1) OF RESIDUALS
-```
-
-```{r diesel,echo = F}
-model <- lm(Diesel_log_ret ~ I(lagpad(Diesel_log_ret, 1)), data = log_ret_dt)
-res <- summary(model)$residuals
-ar_lm_diesel<- lm(res ~ lagpad(res, 1))
-```
-
-```{r diesel_adf}
-adf.test(log_ret_dt$Diesel_log_ret) # no unit root
-```
-
-```{r diesel_res,echo=TRUE,results='asis'}
-stargazer(ar_lm_diesel, header=FALSE,type="html")  #no autocorrelation of residuals
-```
-
-Few of these commodities have autocorrelation of residuals, which should be treated by FGLS or using robust standard errors.
-
-## MA(1) Test
-Only for Diesel since the others would be similar.
-MA is obviously good fit since the data are already differenced (endogenously created)
-
-```{r ma,echo = TRUE,results='asis'}
-diesel_ma <- arima(log_ret_dt$Diesel_log_ret, order = c(0, 0, 1))
-fit_val_diesel_ma<-log_ret_dt$Diesel_log_ret-diesel_ma$residuals
-log_ret_dt <- log_ret_dt%>%mutate(fit_val_diesel_ma= fit_val_diesel_ma)
-stargazer(diesel_ma, header=FALSE,type="html")
-plt<-ggplot(log_ret_dt,aes(x=Date,y=Diesel_log_ret))+
-  geom_line()
-plt+geom_line(log_ret_dt, mapping= aes(x=Date,y=fit_val_diesel_ma), col =2 )
-```
-
-
-```{r ar_differently,echo=TRUE,results='asis'}
-ar<-arima(log_ret_dt$Diesel_log_ret, order = c(1, 0, 0))
-stargazer(ar, header=FALSE,type="html")
-```
-Same as summary(model) from before, so I could also use this package for AR testing.
+</div>
