@@ -210,7 +210,6 @@ corrplot(cor_long_dt, type="upper", order="hclust", tl.col="black", tl.srt=45,
 ggplot(long_dt, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
-  theme(axis.text.x = element_blank()) +
   ggtitle("Prices") +
   geom_vline(xintercept = as.POSIXct("2008-9-15"), color = "Red")
 ```
@@ -221,11 +220,27 @@ Everything but Natural gas looks very correlated, price data are obviously not s
 ggplot(long_log_ret, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
-  theme(axis.text.x = element_blank()) +
   ggtitle("Log Returns - May be stationary")
 ```
 
 ## Statistical Tests
+
+
+```{r summary_table_draft}
+
+summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
+  get_summary_stats(type = "common") %>%select(-variable,n) %>% 
+  rename("variable" = 1)%>%
+  data.table::transpose( keep.names = "col",make.names = "variable")
+summary_df %>%
+  kbl() %>%
+  kable_classic_2()
+```
+```{r}
+
+
+```
+
 
 ### Autocorrelation tests
 
@@ -324,9 +339,12 @@ MA is obviously good fit since the data are already differenced (endogenously cr
 
 ```{r ma,echo = TRUE,results='asis'}
 diesel_ma <- arima(log_ret_dt$Diesel_log_ret, order = c(0, 0, 1))
+fit_val_diesel_ma<-log_ret_dt$Diesel_log_ret-diesel_ma$residuals
+log_ret_dt <- log_ret_dt%>%mutate(fit_val_diesel_ma= fit_val_diesel_ma)
 stargazer(diesel_ma, header=FALSE,type="html")
-ts.plot(log_ret_dt$Diesel_log_ret)
-points(log_ret_dt$Diesel_log_ret-diesel_ma$residuals, type = "l", col = 2, lty = 2)
+plt<-ggplot(log_ret_dt,aes(x=Date,y=Diesel_log_ret))+
+  geom_line()
+plt+geom_line(log_ret_dt, mapping= aes(x=Date,y=fit_val_diesel_ma), col =2 )
 ```
 
 
