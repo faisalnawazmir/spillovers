@@ -18,23 +18,20 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r }
-library(readr)
 library(dplyr)
 library(ggplot2)
 library(reshape2)
 library(dse)
 library(readxl)
-library(zoo)
-library(tseries)
-library(xts)
-library(imputeTS)
 library(ggpubr)
 library(corrplot)
 library(kableExtra)
 library(stargazer)
+library(tseries)
+library(tidyverse)
 ```
 
-```{r}
+```{r lagpad, echo = F}
 # lag function
 lagpad <- function(x, k = 1) {
   i <- is.vector(x)
@@ -50,7 +47,7 @@ lagpad <- function(x, k = 1) {
 
 ## Load data
 
-```{r}
+```{r load_data}
 nat_gas_spot <- read_excel("data/NG_PRI_FUT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
   rename("Natural_Gas" = 2)
 crude_oil_spot <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
@@ -62,11 +59,7 @@ heating_oil <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 4", skip = 
 diesel <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 5", skip = 2) %>%
   select(-2, -3) %>%
   rename("Diesel" = 2)
-```
 
-### Group to dataframe and time-series form
-
-```{r include=F}
 dt <- nat_gas_spot %>%
   full_join(crude_oil_spot, by = "Date") %>%
   full_join(gasoline, by = "Date") %>%
@@ -74,8 +67,16 @@ dt <- nat_gas_spot %>%
   full_join(diesel, by = "Date") %>%
   arrange(Date) %>%
   filter(Date >= "1997-01-07") %>%
-  mutate(Date=as.Date(Date))
+  mutate(Date=as.Date(Date),
+         Day = weekdays(Date)) %>%
+  select(1,9,2:8)
 
+head(dt) %>% 
+  kbl() %>%
+  kable_classic_2(full_width = F)
+```
+
+```{r ts, include=F, eval=F}
 nat_gas_spot_ts <- xts(nat_gas_spot$Natural_Gas, frequency = 365, order.by = as.Date(nat_gas_spot$Date))
 crude_oil_spot <- ts(crude_oil_spot[, 1:2], frequency = 7, start = as.Date("1997-01-07"), end = as.Date("2021-07-01"))
 NY_Gasoline_ts <- ts(gasoline[, c(1, 2)], start = as.Date("1997-01-07"))
@@ -83,56 +84,72 @@ Gulf_Gasoline_ts <- ts(gasoline[, c(1, 3)], start = as.Date("1997-01-07"))
 heating_oil_ts <- ts(heating_oil, start = as.Date("1997-01-07"))
 diesel_ts <- ts(diesel, start = as.Date("1997-01-07"))
 ts_list <- list(nat_gas_spot_ts, crude_oil_spot, NY_Gasoline_ts, Gulf_Gasoline_ts, heating_oil_ts, diesel_ts)
-```
 
-```{r}
 attr(nat_gas_spot_ts, "frequency") <- 7
 nat_gas_spot_ts <- na.omit(nat_gas_spot_ts)
-plot(decompose(as.ts(nat_gas_spot_ts))) 
+plot(decompose(as.ts(nat_gas_spot_ts)))
+
+#Dont know hot to use this decomposition, but might be a useful tool in the future.
 ```
-Dont know hot to use this decomposition, but might be a useful tool in the future.
+
 
 
 ### Removing NAs
 
-```{r}
-colSums(is.na(dt))
-nrow(dt) # about 2% NAs
+```{r NAs, echo = F}
+print("Sum on NAs in each column")
+colSums(is.na(dt))%>%
+    kbl(col.names="NAs") %>%
+  kable_classic_2(full_width = F)
+print("Sample of uncomplete data")
 aux <- dt[!complete.cases(dt), ]
 head(aux) %>% 
+  rbind(aux%>%filter(Day=="Sunday"))%>%
+  kbl() %>%
+  kable_classic_2(full_width = F)
+print("NA occurrences per weekday: no particular pattern in weekdays, although most reported on Monday")
+table(aux$Day)
+```
+
+We see that our data contains some NAs. There are multiple reasons for it:
+
+* In the month of March 2020, Natural_Gas values have been reported on Sunday
+* Europe Brent crude oil benchmark is reported on days where the others are not. There might be a way to compute one from the other, so that we could use a union of the two, but for the time being, we will only use the WTI crude oil metric.
+* The first column "Natural_Gas" comes from a separate dataset than the rest of the variables, resulting in approximately 25 days where only Natural_Gas has been reported, and 15 rows where all but Natural_Gas has been reported. The former has no pattern other than a monthly occurrence. The latter happened in two consecutive weeks in September 2005. 
+
+These NAs are listed in the table below. Apart from the NAs explained above, there are roughly 10 unexplained NAs remaining. 
+
+It might be best to treat the first and second data source as separate, but there is only a few NAs remaining, so for this purpose, we simply substitute with mean. Could also substitute with the rolling average.
+
+
+```{r na_treating1, echo = F}
+aux2<-aux %>% select(-Crude_Oil_Europe_Brent) %>% filter(Day != "Sunday") # treating the first 2 sources of NA
+NA_dates <- aux2 %>%
+  filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
+  pull(Date)
+
+aux2<-aux2%>% filter(!Date %in% NA_dates)
+aux3<-aux2[!complete.cases(aux2), ]
+aux3%>%
   kbl() %>%
   kable_classic_2(full_width = F)
 ```
 
-We see that the Europe Brent crude oil benchmark is reported on days when the others arent, so we only use WTI.
-Then we will delete rows filled with NAs.
-
-```{r}
-dt <- dt %>% select(-Crude_Oil_Europe_Brent)
+```{r na_treating_main}
+dt <- dt %>% select(-Crude_Oil_Europe_Brent) %>% filter(Day != "Sunday")
 NA_dates <- dt %>%
-  filter_at(vars(-Date), all_vars(is.na(.))) %>%
+  filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
   pull(Date)
 dt <- dt %>% filter(!Date %in% NA_dates)
-
-aux <- dt[!complete.cases(dt), ]
-aux[10:20, ]  %>% 
-  kbl() %>%
-  kable_classic_2(full_width = F)
-
-#Number of NAs in each column:
-colSums(is.na(aux))
 dt <- dt %>% mutate_all(~ replace(., is.na(.), mean(., na.rm = TRUE)))
 ```
-```{r echo =F}
-print(paste("Number of rows in the dataframe:",nrow(dt)))
-```
 
-Data still not complete, mostly differs in the data sources (1st column vs rest). It might be best to treat the first and second source as separate, but there is only a few NAs, so for this purpose, we just substitute with mean. Could also substitue with rolling average.
+
 
 ### Summary statistics - Prices
 
-```{r}
-long_dt <- melt(dt, id.vars = c("Date"))
+```{r prices_stats}
+long_dt <- melt(dt, id.vars = c("Date","Day"))
 
 ggplot(long_dt, aes(factor(variable), value)) + 
 geom_boxplot() + 
@@ -145,15 +162,9 @@ long_dt %>% group_by(as.factor(variable)) %>%
 
 ```
 
-```{r}
-cor_dt <- cor(dt[,-1])
-corrplot(cor_dt, type="upper", order="hclust", tl.col="black", tl.srt=45)
-```
-
 We see that this **crude oil WTI metric** had negative prices at one point. This would not let us do log-returns, so we substitute with low value for now. Should be treated more rigorously later on.
 
-```{r}
-dt[dt$Crude_Oil_WTI<0,"Crude_Oil_WTI"]
+```{r crude_oil_sub}
 dt[dt$Date=="2020-04-20","Crude_Oil_WTI"]<-0.01
 ```
 
@@ -162,9 +173,8 @@ dt[dt$Date=="2020-04-20","Crude_Oil_WTI"]<-0.01
 ```{r}
 log_ret_dt <- tibble(dt[2:nrow(dt), "Date"])
 
-for (i in 2:(ncol(dt))) {
+for (i in 3:(ncol(dt))) {
   var_name <- paste(colnames(dt)[i], "log_ret", sep = "_")
-  print(var_name)
   vals <- log(dt[, i]) %>% pull()
   lag_vals <- diff(vals, lag = 1)
   log_ret_dt[var_name] <- lag_vals
@@ -174,12 +184,8 @@ for (i in 2:(ncol(dt))) {
 
 ### Summary statistics - Log Returns
 
-```{r}
-long_log_ret <- melt(log_ret_dt, id.vars = c("Date"))
-head(long_dt)%>%
-    kbl() %>%
-  kable_classic_2(full_width = F)
-
+```{r log_ret_stats}
+long_log_ret <- melt(log_ret_dt, id.vars = "Date")
 
 ggplot(long_log_ret, aes(factor(variable), value)) + 
 geom_boxplot() + 
@@ -192,14 +198,15 @@ long_log_ret %>% group_by(as.factor(variable)) %>%
 
 ```
 
-```{r}
+```{r corplot_logret}
 cor_long_dt <- cor(log_ret_dt[,-1])
-corrplot(cor_long_dt, type="upper", order="hclust", tl.col="black", tl.srt=45)
+corrplot(cor_long_dt, type="upper", order="hclust", tl.col="black", tl.srt=45,
+         col = COL2('PiYG'), cl.pos = 'b', addCoef.col = 'black')
 ```
 
 ### Basic plots
 
-```{r}
+```{r price_plot}
 ggplot(long_dt, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
@@ -210,7 +217,7 @@ ggplot(long_dt, aes(x = Date, y = value)) +
 
 Everything but Natural gas looks very correlated, price data are obviously not stationary, so we transform to log-returns.
 
-```{r}
+```{r log_ret_plot}
 ggplot(long_log_ret, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
