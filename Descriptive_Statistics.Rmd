@@ -40,6 +40,7 @@ library(lmtest)
 library(stringr)
 library(printr)
 library(frequencyConnectedness)
+library(imputeTS)
 ```
 
 ```{r lagpad, echo = F}
@@ -154,7 +155,10 @@ NA_dates <- df %>%
   filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
   pull(Date)
 df <- df %>% dplyr::filter(!Date %in% NA_dates)
-df <- df %>% mutate_all(~ replace(., is.na(.), mean(., na.rm = TRUE)))
+
+for(i in 3:length(df)){
+  df[,i]<-imputeTS::na_ma(df[,i], k = 10, weighting = "simple")
+}
 ```
 
 
