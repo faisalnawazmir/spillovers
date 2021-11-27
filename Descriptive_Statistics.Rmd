@@ -36,6 +36,7 @@ library(tseries)
 library(tidyverse)
 library(moments)
 library(fGarch)
+library(lmtest)
 ```
 
 ```{r lagpad, echo = F}
@@ -132,7 +133,7 @@ It might be best to treat the first and second data source as separate, but ther
 
 
 ```{r na_treating1, echo = F}
-aux2<-aux %>% select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday") # treating the first 2 sources of NA
+aux2<-aux %>% select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday") # treating the first 2 sources of NAs
 NA_dates <- aux2 %>%
   filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
   pull(Date)
@@ -207,7 +208,7 @@ ggplot(long_log_ret, aes(x = Date, y = value)) +
 ```
 
 
-```{r summary_table_draft}
+```{r summary_table_draft, echo = F}
 
 summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
   get_summary_stats(type = "common") %>%select(-variable,n) %>% 
@@ -217,19 +218,12 @@ rownames(summary_df)<-summary_df[,1]
 summary_df<-summary_df[-1]
 
 
-summary_df[c("skewness", "kurtosis"),] <- rbind(c(sapply(log_ret_df[c(2:7)],skewness),
-                                                  sapply(log_ret_df[c(2:7)],kurtosis),
-                                                  sapply(log_ret_df[1000:6000,c(2:7)],kurtosis)))
-
-
-
-
-summary_df %>%
-  kbl() %>%
-  kable_classic_2()
+summary_df[c("skewness", "kurtosis"),] <- rbind(c(round(sapply(log_ret_df[c(2:7)],skewness),3),
+                                                  round(sapply(log_ret_df[c(2:7)],kurtosis),3)))
+colnames(summary_df) <- stylized_names
 ```
 
-## Statistical Tests
+## Summary and Statistical Tests
 ```{r test_prep, echo = T}
 ar_1_list <- list()
 q_10_list<- list()
@@ -256,10 +250,10 @@ for(i in 2:length(log_ret_df)){
 
 
 ```{r all_tests, echo = F}
-res_matrix<-data.frame(matrix(ncol=6,nrow=10))
+res_matrix<-data.frame(matrix(ncol=6,nrow=12))
 x <- c("name", "age", "gender")
 colnames(res_matrix) <- stylized_names
-rownames(res_matrix)<-c("Shapiro Normality","Shapiro Normality PVal","ADF","ADF Pval","Q(10)","Q(10) Pval","Q2(10)","Q2(10) Pval","ARCH(5)","ARCH(5) PVal")
+rownames(res_matrix)<-c("Shapiro Normality","Shapiro Normality PVal","ADF","ADF Pval","Q(10)","Q(10) Pval","Q2(10)","Q2(10) Pval","ARCH(5)","ARCH(5) Pval","AR(1)","AR(1) Pval")
 
 for (i in 1:length(stylized_names)){
   res_matrix[1,i]<-round(shapiro_norm_list[[i]]$statistic,2)
@@ -270,27 +264,15 @@ for (i in 1:length(stylized_names)){
   res_matrix[6,i]<-ifelse(q_10_list[[i]]$p.value<0.001,"<0.001",q_10_list[[i]]$p.value)
   res_matrix[7,i]<-round(q2_10_list[[i]]$statistic,2)
   res_matrix[8,i]<-ifelse(q2_10_list[[i]]$p.value<0.001,"<0.001",q2_10_list[[i]]$p.value)
-  arch_coefs<-summary(arch_5_list[[i]])$coef[5,]
-  p_val_arch<-2*pt(q=arch_coefs[3], 30, lower=FALSE) 
-  res_matrix[9,i]<-round(arch_coefs[1],2)
-  res_matrix[10,i]<-ifelse(p_val_arch<0.001,"<0.001",p_val_arch)
+  arch_res<-round(coeftest(arch_5_list[[i]]),5)
+  res_matrix[9,i]<-round(arch_res[6,1],2)
+  res_matrix[10,i]<-ifelse(arch_res[6,4]<0.001,"<0.001",arch_res[6,4])
+  ar_res<-round(coeftest(ar_1_list[[i]]),3)
+  res_matrix[11,i]<-ar_res[1,1]
+  res_matrix[12,i]<-ifelse(ar_res[1,4]<0.001,"<0.001",ar_res[1,4])
 }
-
-res_matrix %>%
+summary_df %>% rbind(res_matrix)%>%
   kbl() %>%
-  kable_classic_2()
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 
 ```
-
-<div align="center">
-### AR(1)
-```{r ar_res,echo=TRUE,results='asis'}
-stargazer(ar_1_list, header=FALSE,type="html",column.labels = stylized_names)
-```
-</div>
-<div align="center">
-### MA(1)
-```{r ma_res,echo=TRUE,results='asis'}
-stargazer(ma_1_list, header=FALSE,type="html",column.labels = stylized_names,font.size = "tiny") # to make font size smaller)
-```
-</div>
