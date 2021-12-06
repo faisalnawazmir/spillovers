@@ -1,13 +1,31 @@
 ---
-title: Deskriptivní statistiky časových řad
-author: Daniel Bartušek
+title: "Deskriptivní statistiky časových řad"
+author: "Daniel Bartušek"
 output: html_document
-
-knit: (function(input_file, encoding) {
-  out_dir <- 'docs';
-  rmarkdown::render(input_file,
- encoding=encoding,
- output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+runtime: shiny
+params:
+  period:
+    label: 'Data Period:'
+    value: Full
+    input: select
+    choices:
+    - All
+    - Pre-GFC
+    - GFC
+    - EU debt crisis
+    - Post-EU debt crisis
+    - Covid
+resource_files:
+- data/shiny/break_dates/bp_break_dates_Diesel_log_ret.rds
+- data/shiny/break_dates/bp_break_dates_Heating_Oil_log_ret.rds
+- data/shiny/break_dates/bp_break_dates_Crude_Oil_WTI_log_ret.rds
+- data/shiny/break_dates/bp_break_dates_Natural_Gas_log_ret.rds
+- data/shiny/break_dates/bp_break_dates_NY_Gasoline_log_ret.rds
+- data/shiny/plots/bp_plot_Crude_Oil_WTI_log_ret.rds
+- data/shiny/plots/bp_plot_Diesel_log_ret.rds
+- data/shiny/plots/bp_plot_Heating_Oil_log_ret.rds
+- data/shiny/plots/bp_plot_Natural_Gas_log_ret.rds
+- data/shiny/plots/bp_plot_NY_Gasoline_log_ret.rds
 ---
 ```{r include = F}
 rm(list = ls())
@@ -22,55 +40,42 @@ quiet <- function(x) {
 }
 ```
 
-```{r }
-library(dplyr)
+```{r packages, echo = F }
 library(ggplot2)
-library(reshape2)
-library(dse)
 library(readxl)
 library(ggpubr)
-library(corrplot)
+library(xts)
 library(kableExtra)
 library(stargazer)
 library(tseries)
-library(tidyverse)
 library(moments)
-library(fGarch)
 library(lmtest)
 library(stringr)
-library(printr)
 library(frequencyConnectedness)
 library(imputeTS)
-```
-
-```{r lagpad, echo = F}
-# lag function
-lagpad <- function(x, k = 1) {
-  i <- is.vector(x)
-  if (is.vector(x)) x <- matrix(x) else x <- matrix(x, nrow(x))
-  if (k > 0) {
-    x <- rbind(matrix(rep(NA, k * ncol(x)), ncol = ncol(x)), matrix(x[1:(nrow(x) - k), ], ncol = ncol(x)))
-  } else {
-    x <- rbind(matrix(x[(-k + 1):(nrow(x)), ], ncol = ncol(x)), matrix(rep(NA, -k * ncol(x)), ncol = ncol(x)))
-  }
-  if (i) x[1:length(x)] else x
-}
+library(ggcorrplot)
+library(dplyr)
+library(reshape2)
+library(strucchange)
+library(tidyverse)
 ```
 
 ## Load data
 
-```{r load_data}
-stylized_names <-c("Natural Gas","Crude Oil WTI","NY Gasoline","Gulf Gasoline","Heating Oil","Diesel")
+```{r load_data, include =F}
+stylized_names <-c("Natural Gas","Crude Oil WTI","NY Gasoline","Heating Oil","Diesel")
 
-nat_gas_spot <- read_excel("data/NG_PRI_FUT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
+holidays_df<-read_csv("data/shiny/US Holiday Dates (2004-2021).csv") %>% dplyr::select(1,2)
+
+nat_gas_spot <- read_excel("data/shiny/NG_PRI_FUT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
   rename("Natural_Gas" = 2)
-crude_oil_spot <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
+crude_oil_spot <- read_excel("data/shiny/PET_PRI_SPT_S1_D.xls", sheet = "Data 1", skip = 2) %>%
   rename("Crude_Oil_WTI" = 2, "Crude_Oil_Europe_Brent" = 3)
-gasoline <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 2", skip = 2) %>%
+gasoline <- read_excel("data/shiny/PET_PRI_SPT_S1_D.xls", sheet = "Data 2", skip = 2) %>%
   rename("NY_Gasoline" = 2, "Gulf_Gasoline" = 3)
-heating_oil <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 4", skip = 2) %>%
+heating_oil <- read_excel("data/shiny/PET_PRI_SPT_S1_D.xls", sheet = "Data 4", skip = 2) %>%
   rename("Heating_Oil" = 2)
-diesel <- read_excel("data/PET_PRI_SPT_S1_D.xls", sheet = "Data 5", skip = 2) %>%
+diesel <- read_excel("data/shiny/PET_PRI_SPT_S1_D.xls", sheet = "Data 5", skip = 2) %>%
   dplyr::select(-2, -3) %>%
   rename("Diesel" = 2)
 
@@ -79,144 +84,326 @@ df <- nat_gas_spot %>%
   full_join(gasoline, by = "Date") %>%
   full_join(heating_oil, by = "Date") %>%
   full_join(diesel, by = "Date") %>%
+  left_join(holidays_df,by="Date") %>%
   arrange(Date) %>%
   dplyr::filter(Date >= "1997-01-07") %>%
   mutate(Date=as.Date(Date),
          Day = weekdays(Date)) %>%
-  dplyr::select(1,9,2:8)
-
-head(df) %>% 
-  kbl() %>%
-  kable_classic_2(full_width = F)
+  dplyr::select(Date,Day,Holiday,Natural_Gas,Crude_Oil_WTI,NY_Gasoline,Heating_Oil,Diesel)
+df_orig<-df
 ```
 
-```{r ts, include=F, eval=F}
-nat_gas_spot_ts <- xts(nat_gas_spot$Natural_Gas, frequency = 365, order.by = as.Date(nat_gas_spot$Date))
-crude_oil_spot <- ts(crude_oil_spot[, 1:2], frequency = 7, start = as.Date("1997-01-07"), end = as.Date("2021-07-01"))
-NY_Gasoline_ts <- ts(gasoline[, c(1, 2)], start = as.Date("1997-01-07"))
-Gulf_Gasoline_ts <- ts(gasoline[, c(1, 3)], start = as.Date("1997-01-07"))
-heating_oil_ts <- ts(heating_oil, start = as.Date("1997-01-07"))
-diesel_ts <- ts(diesel, start = as.Date("1997-01-07"))
-ts_list <- list(nat_gas_spot_ts, crude_oil_spot, NY_Gasoline_ts, Gulf_Gasoline_ts, heating_oil_ts, diesel_ts)
-
-attr(nat_gas_spot_ts, "frequency") <- 7
-nat_gas_spot_ts <- na.omit(nat_gas_spot_ts)
-plot(decompose(as.ts(nat_gas_spot_ts)))
-
-#Dont know hot to use this decomposition, but might be a useful tool in the future.
-```
 
 
 
 ### Removing NAs
 
+#### NA Overview
 ```{r NAs, echo = F}
 print("Sum on NAs in each column")
-colSums(is.na(df))%>%
-    kbl(col.names="NAs") %>%
-  kable_classic_2(full_width = F)
-print("Sample of uncomplete data")
+colSums(is.na(df))
 aux <- df[!complete.cases(df), ]
-head(aux) %>% 
-  rbind(aux%>%dplyr::filter(Day=="Sunday"))%>%
-  kbl() %>%
-  kable_classic_2(full_width = F)
 print("NA occurrences per weekday: no particular pattern in weekdays, although most reported on Monday")
 table(aux$Day)
 ```
 
+
 We see that our data contains some NAs. There are multiple reasons for it:
 
 * In the month of March 2020, Natural_Gas values have been reported on Sunday
-* Europe Brent crude oil benchmark is reported on days where the others are not. There might be a way to compute one from the other, so that we could use a union of the two, but for the time being, we will only use the WTI crude oil metric.
-* The first column "Natural_Gas" comes from a separate dataset than the rest of the variables, resulting in approximately 25 days where only Natural_Gas has been reported, and 15 rows where all but Natural_Gas has been reported. The former has no pattern other than a monthly occurrence. The latter happened in two consecutive weeks in September 2005. 
-
-These NAs are listed in the table below. Apart from the NAs explained above, there are roughly 10 unexplained NAs remaining. 
-
-It might be best to treat the first and second data source as separate, but there is only a few NAs remaining, so for this purpose, we simply substitute with mean. Could also substitute with the rolling average.
+* The first column "Natural_Gas" is not an american index. Therefore, its values have been reported on days, when there were holidays in the US, resulting in approximately 25 NAs in years 2015 onward.
+* NG has not been reported for two consecutive weeks in September 2005. Since the futures are priced similarly for this period, we will substitute the missing data with the prices of futures
 
 
-```{r na_treating1, echo = F}
-aux2<-aux %>% dplyr::select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday") # treating the first 2 sources of NAs
-NA_dates <- aux2 %>%
-  filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
+```{r nat_gas_fut}
+nat_gas_fut<- read_excel("data/shiny/NG_PRI_FUT_S1_D.xls", sheet = "Data 2", skip = 2) %>%
+  rename("Natural_Gas_Fut" = 2) %>% dplyr::select(1,2)
+
+nat_gas_df<-nat_gas_spot%>% full_join(nat_gas_fut) %>% filter(Date >= "2005-09-16",Date<="2005-10-17") %>% arrange(Date)
+
+nat_gas_df %>%
+  kbl()%>%
+  kable_classic_2(full_width = F)
+
+```
+
+
+```{r NA before}
+NA_dates <- df %>%
+  filter_at(vars(-Date,-Day,-Holiday), all_vars(is.na(.))) %>%
   pull(Date)
-
-aux2<-aux2%>% dplyr::filter(!Date %in% NA_dates)
-aux3<-aux2[!complete.cases(aux2), ]
-aux3%>%
-  kbl() %>%
+df <- df %>% dplyr::filter(!Date %in% NA_dates) %>% dplyr::filter(Day!="Sunday")
+df_NA<-df %>% filter_at(vars(-Date,-Day,-Holiday), any_vars(is.na(.)))
+df_NA %>%
+  kbl()%>%
   kable_classic_2(full_width = F)
 ```
 
-```{r na_treating_main}
-df <- df %>% dplyr::select(-Crude_Oil_Europe_Brent) %>% dplyr::filter(Day != "Sunday")
-NA_dates <- df %>%
-  filter_at(vars(-c(Date,Day)), all_vars(is.na(.))) %>%
-  pull(Date)
-df <- df %>% dplyr::filter(!Date %in% NA_dates)
 
-for(i in 3:length(df)){
-  df[,i]<-imputeTS::na_ma(df[,i], k = 10, weighting = "simple")
+### Missing after all systematic NA sources have been dealt with
+
+```{r NA after}
+##replace missing Nat_Gas spot prices with futures
+na_2005<-nat_gas_df[!complete.cases(nat_gas_df),] %>% mutate(Date=as.Date(Date)) %>% dplyr::select(-"Natural_Gas")
+df<-df%>%left_join(na_2005) %>% mutate(Natural_Gas = coalesce(Natural_Gas,Natural_Gas_Fut)) %>%dplyr::select(-"Natural_Gas_Fut")
+
+#Remove data where there was a holiday and the metrics were not reported
+df<-df %>% dplyr::filter(!(!is.na(Holiday) &
+                             (is.na(Crude_Oil_WTI) | is.na(Natural_Gas) | 
+                                is.na(NY_Gasoline) | is.na(Heating_Oil) | is.na(Diesel))
+                           ))
+df_NA<-df %>% filter_at(vars(-Date,-Day,-Holiday), any_vars(is.na(.)))
+df_NA %>%
+  kbl()%>%
+  kable_classic_2(full_width = F)
+# rest is substituted with the previous days price
+for(i in 4:length(df)){
+  df[,i]<-imputeTS::na_ma(df[,i], k = 1, weighting = "simple")
 }
 ```
 
-
-
 ### Prices
-```{r prices_stats}
-long_df <- reshape2::melt(df, id.vars = c("Date","Day"))
+```{r prices_stats,echo=F}
+long_df <- reshape2::melt(df, id.vars = c("Date","Day","Holiday"))
+  selectInput("period", "Choose a period:",
+      list(`Period` = list("All","Pre-GFC", "GFC", "EU debt crisis", "Post-EU debt crisis","Covid"))
+    )
 
-ggplot(long_df, aes(x = Date, y = value)) +
+
+
+renderPlot({
+dt_from<-case_when(input$period == "Pre-GFC" ~ "1997-01-07",
+          input$period == "GFC"~"2008-09-15",
+          input$period == "EU debt crisis"~"2010-05-03",
+          input$period == "Post-EU debt crisis"~"2012-07-27",
+          input$period == "Covid"~"2020-02-02",
+          input$period == "All"~"1997-01-07")
+dt_to<-case_when(input$period == "Pre-GFC" ~ "12008-09-14",
+          input$period == "GFC"~"2010-04-30",
+          input$period == "EU debt crisis"~"2012-07-26",
+          input$period == "Post-EU debt crisis"~"2020-02-01",
+          input$period == "Covid"~"2022-01-01",
+          input$period == "All"~"2022-01-01")         
+          
+
+long_df_aux<-long_df[long_df$Date>=dt_from,]
+long_df_aux<-long_df_aux[long_df_aux$Date<=dt_to,]
+
+ggplot(long_df_aux, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
   ggtitle("Prices") +
   geom_vline(xintercept = as.POSIXct("2008-9-15"), color = "Red")
+})
 
-ggplot(long_df, aes(factor(variable), value)) + 
-geom_boxplot() + 
-facet_wrap(~variable, scale="free")
+renderPlot({
+dt_from<-case_when(input$period == "Pre-GFC" ~ "1997-01-07",
+          input$period == "GFC"~"2008-09-15",
+          input$period == "EU debt crisis"~"2010-05-03",
+          input$period == "Post-EU debt crisis"~"2012-07-27",
+          input$period == "Covid"~"2020-02-02",
+          input$period == "All"~"1997-01-07")
+dt_to<-case_when(input$period == "Pre-GFC" ~ "12008-09-14",
+          input$period == "GFC"~"2010-04-30",
+          input$period == "EU debt crisis"~"2012-07-26",
+          input$period == "Post-EU debt crisis"~"2020-02-01",
+          input$period == "Covid"~"2022-01-01",
+          input$period == "All"~"2022-01-01")  
+long_df_aux<-long_df[long_df$Date>dt_from,]
+long_df_aux<-long_df_aux[long_df_aux$Date<dt_to,]
+
+ggplot(long_df_aux, aes(factor(variable), value)) + 
+  geom_boxplot() + 
+  facet_wrap(~variable, scale="free")
+})
+
 ```
 
 
 We see that this **crude oil WTI metric** had negative prices at one point. This would not let us do log-returns, so we substitute with low value for now. Should be treated more rigorously later on.
 
 ```{r crude_oil_sub}
-df[df$Date=="2020-04-20","Crude_Oil_WTI"]<-0.01
+for (i in 1:nrow(df)){
+  val<-df[i,"Crude_Oil_WTI"]
+  if(val<0){
+    df[i,"Crude_Oil_WTI"] <-(df[i-1,"Crude_Oil_WTI"]+df[i+1,"Crude_Oil_WTI"])/2
+  }
+}
+df[df$Date=="2020-04-20","Crude_Oil_WTI"]
 ```
 
-### Log returns
+## Log returns
 
 ```{r log_ret}
 log_ret_df <- tibble(df[2:nrow(df), "Date"])
-
-for (i in 3:(ncol(df))) {
+for (i in 4:(ncol(df))) {
   var_name <- paste(colnames(df)[i], "log_ret", sep = "_")
   vals <- log(df[, i]) %>% pull()
   lag_vals <- base::diff(vals, lag = 1)
   log_ret_df[var_name] <- lag_vals
 }
 long_log_ret <- melt(log_ret_df, id.vars = "Date")
+dates<-log_ret_df %>% dplyr::select(1)%>%pull()
+char_dates<-as.character(dates)
+```
+
+### Structural changes estimation
+
+```{r struct_change, eval = F, include = F}
+#save BP object
+for(i in 2:length(log_ret_df)){
+  col<-colnames(log_ret_df)[i]
+  print(col)
+  val<-log_ret_df %>% dplyr::select(i)%>%pull() 
+  ##Chow Test: H0: no structural break in the data
+  chow<-sctest(I(val^2)~1,type="Chow")
+  ## Bai Perron
+  bp <- breakpoints(I(val^2) ~ 1,h=600) 
+  bp_name<-paste("data/shiny/bp","_", col,".rds",sep="")
+  chow_name<-paste("data/shiny/chow","_", col,".rds",sep="")
+  print(bp_name)
+  saveRDS(bp,file=bp_name)
+  saveRDS(chow,file=chow_name)
+}
+
+input<-colnames(log_ret_df)[-c(1)]
+#save Plots and Breakpoints
+for (i in input){
+bp_name<-paste("data/shiny/bp","_", i,".rds",sep="")
+print(bp_name)
+bp<-readRDS(bp_name)
+
+bp_plot<-plot(bp)
+sum_bp<-summary(bp)
+sum_bp_df<-sum_bp$breakpoints%>%as.data.frame()
+bp_break_dates<-sapply(sum_bp_df,function(x) char_dates[x]) %>% as.data.frame()
+
+bp_name_plot<-paste("data/shiny/plots/bp_plot","_", i,".rds",sep="")
+bp_name_dates<-paste("data/shiny/break_dates/bp_break_dates","_", i,".rds",sep="")
+
+saveRDS(bp_plot,file=bp_name_plot)
+saveRDS(bp_break_dates,file=bp_name_dates)
+}
+```
+
+```{r breakpoints, echo = F, include=F}
+dates<-log_ret_df %>% dplyr::select(1)%>%pull()
+char_dates<-as.character(dates)
+selectInput("struct_change", "Choose a series:",
+      list(`Log Returns Period` = colnames(log_ret_df[-1]))
+    )
+renderPrint({
+   chow_name<-paste("data/shiny/chow","_", input$struct_change,".rds",sep="") 
+   chow<-readRDS(chow_name)
+    print("Chow test (H0: there are no structural brakes)")
+    print(chow)
+})
+renderTable({
+   bp_name<-paste("data/shiny/break_dates/bp_break_dates_", input$struct_change,".rds",sep="")
+   bp_df<-readRDS(bp_name)
+   rownames(bp_df)<-paste(rep(1:nrow(bp_df)),"Breakpoints modeled")
+   colnames(bp_df)<-paste("Breakpoint",rep(1:nrow(bp_df)))
+   bp_df
+},rownames = TRUE)
+renderPlot({
+   bp_name<-paste("data/shiny/plots/bp_plot_", input$struct_change,".rds",sep="")
+   bp<-readRDS(bp_name)
+   plot(bp)
+})
 ```
 
 
-```{r corplot_logret}
-cor_long_df <- cor(log_ret_df[,-1])
-corrplot(cor_long_df, type="upper", order="hclust", tl.col="black", tl.srt=45,
-         col = COL2('PiYG'), cl.pos = 'b', addCoef.col = 'black')
-```
+```{r corplot_logret,echo=F,message=T,warning=T}
+
+selectInput("period_corrplot", "Choose a period:",
+      list(`Log Returns Period` = list("All","Pre-GFC", "GFC", "EU debt crisis", "Post-EU debt crisis","Covid"))
+    )
+
+renderPlot({
+dt_from<-case_when(input$period_corrplot == "Pre-GFC" ~ "1997-01-07",
+          input$period_corrplot == "GFC"~"2008-09-15",
+          input$period_corrplot == "EU debt crisis"~"2010-05-03",
+          input$period_corrplot == "Post-EU debt crisis"~"2012-07-27",
+          input$period_corrplot == "Covid"~"2020-02-02",
+          input$period_corrplot == "All"~"1997-01-07")
+dt_to<-case_when(input$period_corrplot == "Pre-GFC" ~ "12008-09-14",
+          input$period_corrplot == "GFC"~"2010-04-30",
+          input$period_corrplot == "EU debt crisis"~"2012-07-26",
+          input$period_corrplot == "Post-EU debt crisis"~"2020-02-01",
+          input$period_corrplot == "Covid"~"2022-01-01",
+          input$period_corrplot == "All"~"2022-01-01")
 
 
-```{r log_ret_plot}
-ggplot(long_log_ret, aes(x = Date, y = value)) +
+log_ret_df <- tibble(df[2:nrow(df), "Date"])
+
+for (i in 4:(ncol(df))) {
+  var_name <- paste(colnames(df)[i], "log_ret", sep = "_")
+  vals <- log(df[, i]) %>% pull()
+  lag_vals <- base::diff(vals, lag = 1)
+  log_ret_df[var_name] <- lag_vals
+}
+log_ret_aux2<-log_ret_df[(log_ret_df$Date>=dt_from & log_ret_df$Date<=dt_to),]
+corr <- round(cor(log_ret_aux2[-1]),12)
+#log_ret_aux2["Date"]<-as.Date(log_ret_aux2["Date"]*24*60*60, origin = "1970-01-01", tz="UTC")
+ggcorrplot(corr, hc.order = TRUE, type = "lower",lab = TRUE)
+})
+
+renderPlot({
+dt_from<-case_when(input$period_corrplot == "Pre-GFC" ~ "1997-01-07",
+          input$period_corrplot == "GFC"~"2008-09-15",
+          input$period_corrplot == "EU debt crisis"~"2010-05-03",
+          input$period_corrplot == "Post-EU debt crisis"~"2012-07-27",
+          input$period_corrplot == "Covid"~"2020-02-02",
+          input$period_corrplot == "All"~"1997-01-07")
+dt_to<-case_when(input$period_corrplot == "Pre-GFC" ~ "12008-09-14",
+          input$period_corrplot == "GFC"~"2010-04-30",
+          input$period_corrplot == "EU debt crisis"~"2012-07-26",
+          input$period_corrplot == "Post-EU debt crisis"~"2020-02-01",
+          input$period_corrplot == "Covid"~"2022-01-01",
+          input$period_corrplot == "All"~"2022-01-01")
+
+log_ret_aux<-long_log_ret[(long_log_ret$Date>=dt_from &long_log_ret$Date<=dt_to),]
+
+ggplot(log_ret_aux, aes(x = Date, y = value)) +
   geom_line() +
   facet_wrap(~variable, scales = "free") +
   ggtitle("Log Returns - May be stationary")
+
+})
 ```
 
 
-```{r summary_table_draft, echo = F}
+### Summary and Statistical Tests
+```{r test_prep, echo = F}
+selectInput("period_table", "Choose a period:",
+      list(`Log Returns Period` = list("All","Pre-GFC", "GFC", "EU debt crisis", "Post-EU debt crisis","Covid"))
+    )
+renderTable({
+dt_from<-case_when(input$period_table == "Pre-GFC" ~ "1997-01-07",
+          input$period_table == "GFC"~"2008-09-15",
+          input$period_table == "EU debt crisis"~"2010-05-03",
+          input$period_table == "Post-EU debt crisis"~"2012-07-27",
+          input$period_table == "Covid"~"2020-02-02",
+          input$period_table == "All"~"1997-01-07")
+dt_to<-case_when(input$period_table == "Pre-GFC" ~ "12008-09-14",
+          input$period_table == "GFC"~"2010-04-30",
+          input$period_table == "EU debt crisis"~"2012-07-26",
+          input$period_table == "Post-EU debt crisis"~"2020-02-01",
+          input$period_table == "Covid"~"2022-01-01",
+          input$period_table == "All"~"2022-01-01")
 
+log_ret_df <- tibble(df[2:nrow(df), "Date"])
+
+for (i in 4:(ncol(df))) {
+  var_name <- paste(colnames(df)[i], "log_ret", sep = "_")
+  vals <- log(df[, i]) %>% pull()
+  lag_vals <- base::diff(vals, lag = 1)
+  log_ret_df[var_name] <- lag_vals
+}
+
+long_log_ret<-long_log_ret[(long_log_ret$Date>=dt_from &long_log_ret$Date<=dt_to),]
+log_ret_df<-log_ret_df[(log_ret_df$Date>=dt_from & log_ret_df$Date<=dt_to),]  
+  
 summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
   get_summary_stats(type = "common") %>%dplyr::select(-variable,n) %>% 
   rename("variable" = 1)%>%
@@ -224,14 +411,10 @@ summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
 rownames(summary_df)<-summary_df[,1]
 summary_df<-summary_df[-1]
 
-
-summary_df[c("skewness", "kurtosis"),] <- rbind(c(round(sapply(log_ret_df[c(2:7)],skewness),3),
-                                                  round(sapply(log_ret_df[c(2:7)],kurtosis),3)))
+summary_df[c("skewness", "kurtosis"),] <- rbind(c(round(sapply(log_ret_df[c(2:6)],skewness),3),
+                                                  round(sapply(log_ret_df[c(2:6)],kurtosis),3)))
 colnames(summary_df) <- stylized_names
-```
 
-## Summary and Statistical Tests
-```{r test_prep, echo = T}
 ar_1_list <- list()
 q_10_list<- list()
 q2_10_list<- list()
@@ -243,8 +426,9 @@ jarque_bera_list<-list()
 
 for(i in 2:length(log_ret_df)){
   val<-log_ret_df[,i] %>% pull()
-  res<-lm(val~I(lagpad(val, 1)))$residuals
-  shapiro_norm_list[[i-1]]<-shapiro.test(sample(val,size=5000,replace = F))
+  lag_val<-lag(val,1)
+  res<-lm(val~lag_val)$residuals
+  shapiro_norm_list[[i-1]]<-shapiro.test(sample(val,size=min(5000,length(val)),replace = F))
   adf_list[[i-1]] <- adf.test(val)
   ma_1_list[[i-1]] <- arima(val, order = c(0, 0, 1)) 
   ar_1_list[[i-1]] <- arima( res, order = c(1, 0, 0))
@@ -254,11 +438,7 @@ for(i in 2:length(log_ret_df)){
   jarque_bera_list[[i-1]]<-jarque.bera.test(val)
 }
 
-```
-
-
-```{r all_tests, echo = F}
-res_matrix<-data.frame(matrix(ncol=6,nrow=14))
+res_matrix<-data.frame(matrix(ncol=length(stylized_names),nrow=14))
 x <- c("name", "age", "gender")
 colnames(res_matrix) <- stylized_names
 rownames(res_matrix)<-c("Shapiro Normality","Shapiro Normality PVal","ADF","ADF Pval","Q(10)","Q(10) Pval","Q2(10)","Q2(10) Pval","ARCH(5)","ARCH(5) Pval","AR(1)","AR(1) Pval","Jarque-Berra","Jarque Berra Pval")
@@ -296,43 +476,188 @@ for (i in 1:length(res_matrix)){
 }
 
 final_df<-summary_df %>% rbind(res_matrix)
-
-final_kbl<-final_df%>%
-  kbl() %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
-
-final_kbl
+final_df
+},
+rownames = TRUE, width="100%",spacing="xs")
 ```
+
+## Spillovers
+
+All functions are documented in the frequencyConnectedness package on [Cran](https://cran.r-project.org/web/packages/frequencyConnectedness/frequencyConnectedness.pdf). Here I use only the spilloverDY09 index (according to Diebold Yilmaz (2009)).
 
 ```{r spillovers spec}
 sp_list<-lsf.str("package:frequencyConnectedness")
 sp_list<-sp_list[str_detect(sp_list,"spill")]
 print(sp_list)
-help(sp_list[1])
+```
+
+### Check appropriate VAR lag by adjusted R squared?
+
+#### Max Lag set to 15
+```{r VAR}
+opt_lag<-VARselect(log_ret_df[-c(1)]^2,type="const",lag.max=15)
+df_opt<-data.frame(t(opt_lag$criteria))
+rownames(df_opt)<-paste("Lag",rep(1:nrow(df_opt)))
+df_opt%>%
+  kbl()%>%
+  kable_classic_2(full_width = F)
+opt_lag$selection
+```
+#### Max Lag set to 4
+```{r maxlag 4}
+opt_lag<-VARselect(log_ret_df[-1],type="const",lag.max=4)
+df_opt<-data.frame(t(opt_lag$criteria))
+rownames(df_opt)<-paste("Lag",rep(1:nrow(df_opt)))
+df_opt%>%
+  kbl()%>%
+  kable_classic_2(full_width = F)
+opt_lag$selection
+```
+
+#### Testing of AR in residuals for vars::VAR(2) and vars::VAR(4)
+```{r AR for VAR, echo=F}
+var_2 <- vars::VAR(log_ret_df[-1], p = 2, type = "const")
+var_4<- vars::VAR(log_ret_df[-1], p = 4, type = "const")
+
+ar_lag2_list<-list()
+ar_lag4_list<-list()
+for(i in 1:length(var_2$varresult)){
+  res2<-var_2$varresult[i][[1]]$residuals
+  res4<-var_4$varresult[i][[1]]$residuals
+  ar_lag2_list[[i]] <- arima( res2, order = c(1, 0, 0))
+  ar_lag4_list[[i]] <- arima( res4, order = c(1, 0, 0))
+}
 ```
 
 
-```{r DY_2009}
-log_ret_df<-log_ret_df[-1] #no date
-est <- VAR(log_ret_df, p = 2, type = "const")
-sp<-spilloverDY09(est, n.ahead = 100, no.corr = F)
+#### AR of residuals with lag 2
+```{r stargazer2,results='asis'}
+stargazer(ar_lag2_list,type="html",align = T)
 ```
 
-```{r sp_graphs}
-overall(sp)
-to(sp)
-from(sp)
-net(sp)
-pairwise(sp)
+#### AR of residuals with lag 4
+```{r stargazer4,results='asis'}
+stargazer(ar_lag4_list,type="html",align = T)
 ```
 
-```{r rolling_plots}
+
+```{r sp_tables, eval = F, include =F}
+overall(sp) %>% kbl()
+to(sp) %>% kbl()
+from(sp) %>% kbl()
+net(sp) %>% kbl()
+pairwise(sp) %>% kbl()
+```
+
+#### Forecast error vector decmposition in recursive identification scheme
+
+```{r}
+est<-vars::VAR(log_ret_df[-1], p = 2, type = "const")
+forecast<-fevd(est)
+#a matrix that corresponds to contribution of ith variable to jth variance of forecast
+forecast %>%
+  kbl()%>%
+  kable_classic_2(full_width = F)
+```
+## Switching to Rolling Spillover
+
+#### Investigating the huge spillovers
+```{r rolling_sp}
 # Get the rolling window estimates
 params_est = list(p = 2, type = "const")
-sp <- spilloverRollingDY09(log_ret_df[-1], n.ahead = 100, no.corr = F, "VAR", params_est = params_est, window = 100)
-plotOverall(sp)
-plotTo(sp)
-plotFrom(sp)
+ahead=100
+window_size=100
+dates<-log_ret_df[1:nrow(log_ret_df),1] %>% pull()
+#sp <- spilloverRollingDY12(log_ret_df[-1], n.ahead =ahead, no.corr = F, "VAR", params_est = params_est, window = window_size)
+
+sp<-readRDS("data/shiny/sp.rds")
+for (i in 1:length(sp[[1]])){
+  sp[[1]][[i]]$date<-as.POSIXct(dates[i])
+}
+ov_sp<-overall(sp)[[1]] %>% as.data.frame()
+ov_sp <- cbind(1:nrow(ov_sp),rownames(ov_sp), ov_sp)
+rownames(ov_sp) <- 1:nrow(ov_sp)
+colnames(ov_sp)<-c("Index","Date","val")
+ov_sp %>% arrange(desc(val)) %>% head(n=10) %>%
+    kbl()%>%
+    kable_classic_2(full_width = F)
 ```
 
+Observe the VAR matrix for a window ending with one of the spikes
+```{r sp_100}
+## Calculate non-rolling SP only on this window
+test<-log_ret_df[663:763,-1]
+est100 <- vars::VAR(test, p = 2, type = "const")
+sp_100<-spilloverDY12(est100, n.ahead = 100, no.corr = F)
+sp_100
+z<-summary(est100)
+#Observe the heating oil specifically
+z$varresult[[4]]
+```
+
+### Various n.ahead (a) and windows (w)
+Summary: 
+
+only the window parameter influences values
+
+bigger window produces smaller spikes
+```{r echo = F}
+sp_plots<-list.files("./data/shiny/sp_data/plots")
+par(mfrow=c(3,3))
+for (i in sp_plots){
+  sp_plot<-readRDS(paste0("data/shiny/sp_data/plots/",i))
+  plot(sp_plot,main=i)
+}
+```
+
+
+```{r sp_100_200}
+sp_100_200<-readRDS("data/shiny/sp_data/spa100w200")
+ov_sp<-overall(sp_100_200)[[1]] %>% as.data.frame()
+ov_sp <- cbind(1:nrow(ov_sp),rownames(ov_sp), ov_sp)
+rownames(ov_sp) <- 1:nrow(ov_sp)
+colnames(ov_sp)<-c("Index","Date","val")
+ov_sp %>% arrange(desc(val)) %>% head(n=10) %>%
+    kbl()%>%
+    kable_classic_2(full_width = F)
+```
+
+```{r plot_rolling}
+# plotOverall(sp)
+# plotTo(sp)
+# plotFrom(sp)
+# plotNet(sp)
+# plotPairwise(sp)
+```
+
+
+
+```{r include = F, eval = F}
+library(parallel)
+cl <- makeCluster(8)
+sp <- spilloverRollingDY12(log_ret_df[-1], n.ahead = 100, no.corr = F, func_est = "VAR", 
+                           params_est = list(p = 2, type = "const"), 
+                           window = 100,cluster  = cl)
+plotOverall(sp)
+nm<-paste0("sp","a",200,"w",space+1)
+fullnm<-paste0("data/shiny/sp_data/",nm)
+saveRDS(sp,fullnm)
+stopCluster(cl)
+
+sp_ls<-list.files("./data/shiny/sp_data")
+sp_ls<-sp_ls[-1]
+for (i in sp_ls){
+  print(i)
+  sp<-readRDS(paste0("data/shiny/sp_data/",i))
+  space<-length(dates)-length(sp[[1]])+1
+  print(space)
+  dates_temp<-dates[space:length(dates)]
+  for (j in 1:length(sp[[1]])){
+    sp[[1]][[j]]$date<-as.POSIXct(dates_temp[j])
+  }
+  ov_plot<-plotOverall(sp)
+  ov_plot_nm<-paste0("data/shiny/sp_data/plots/",i)
+  saveRDS(ov_plot,ov_plot_nm)
+}
+```
 
